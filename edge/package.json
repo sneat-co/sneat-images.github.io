@@ -1,0 +1,16 @@
+{
+  "name": "@sneat/media-edge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit && vitest run",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.11.1",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4",
+    "wrangler": "4.35.0"
+  }
+}

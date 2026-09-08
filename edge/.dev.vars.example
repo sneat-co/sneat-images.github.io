@@ -1,0 +1,2 @@
+MEDIA_ACCESS_PUBLIC_KEY="base64-encoded Ed25519 SPKI public key"
+MEDIA_ORIGIN_SECRET="shared secret for the Sneat Go origin endpoint"

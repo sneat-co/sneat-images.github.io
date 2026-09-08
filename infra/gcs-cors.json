@@ -1,0 +1,17 @@
+[
+  {
+    "origin": [
+      "https://sneat.app",
+      "https://www.sneat.app",
+      "http://localhost:4200",
+      "http://localhost:8100"
+    ],
+    "method": ["POST", "PUT", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Location",
+      "x-goog-resumable"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
