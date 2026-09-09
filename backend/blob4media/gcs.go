@@ -23,11 +23,18 @@ type GCSStore struct {
 	Bucket         string
 	GoogleAccessID string
 	PrivateKey     []byte
+	SignBytes      func(context.Context, []byte) ([]byte, error)
 }
 
-func (s GCSStore) BeginResumableUpload(_ context.Context, objectKey, contentType string, expiresAt time.Time) (UploadCapability, error) {
+func (s GCSStore) BeginResumableUpload(ctx context.Context, objectKey, contentType string, expiresAt time.Time) (UploadCapability, error) {
+	var signBytes func([]byte) ([]byte, error)
+	if s.SignBytes != nil {
+		signBytes = func(payload []byte) ([]byte, error) {
+			return s.SignBytes(ctx, payload)
+		}
+	}
 	url, err := storage.SignedURL(s.Bucket, objectKey, &storage.SignedURLOptions{
-		Scheme: storage.SigningSchemeV4, GoogleAccessID: s.GoogleAccessID, PrivateKey: s.PrivateKey,
+		Scheme: storage.SigningSchemeV4, GoogleAccessID: s.GoogleAccessID, PrivateKey: s.PrivateKey, SignBytes: signBytes,
 		Method: http.MethodPost, ContentType: contentType, Headers: []string{"x-goog-resumable:start"}, Expires: expiresAt,
 	})
 	if err != nil {
