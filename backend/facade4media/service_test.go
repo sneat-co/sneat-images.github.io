@@ -3,10 +3,8 @@
 package facade4media
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
-	"io"
 	"testing"
 	"time"
 
@@ -24,11 +22,11 @@ type fakeBlob struct {
 func (f *fakeBlob) BeginResumableUpload(_ context.Context, _ string, _ string, expires time.Time) (blob4media.UploadCapability, error) {
 	return blob4media.UploadCapability{URL: "https://storage.example/upload", Method: "POST", Headers: map[string]string{"x-goog-resumable": "start"}, ExpiresAt: expires}, nil
 }
+func (f *fakeBlob) BeginRead(_ context.Context, _ string, _ int64, expires time.Time) (blob4media.ReadCapability, error) {
+	return blob4media.ReadCapability{URL: "https://storage.example/original", ExpiresAt: expires}, nil
+}
 func (f *fakeBlob) InspectImage(context.Context, string, int64) (blob4media.ImageInfo, error) {
 	return f.info, nil
-}
-func (f *fakeBlob) Open(context.Context, string) (io.ReadCloser, error) {
-	return io.NopCloser(bytes.NewReader([]byte("image"))), nil
 }
 func (f *fakeBlob) Delete(context.Context, string, int64) error { f.deleted = true; return nil }
 

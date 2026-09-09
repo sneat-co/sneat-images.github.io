@@ -13,6 +13,8 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -27,20 +29,38 @@ type GCSStore struct {
 }
 
 func (s GCSStore) BeginResumableUpload(ctx context.Context, objectKey, contentType string, expiresAt time.Time) (UploadCapability, error) {
-	var signBytes func([]byte) ([]byte, error)
-	if s.SignBytes != nil {
-		signBytes = func(payload []byte) ([]byte, error) {
-			return s.SignBytes(ctx, payload)
-		}
-	}
 	url, err := storage.SignedURL(s.Bucket, objectKey, &storage.SignedURLOptions{
-		Scheme: storage.SigningSchemeV4, GoogleAccessID: s.GoogleAccessID, PrivateKey: s.PrivateKey, SignBytes: signBytes,
+		Scheme: storage.SigningSchemeV4, GoogleAccessID: s.GoogleAccessID, PrivateKey: s.PrivateKey, SignBytes: s.contextSigner(ctx),
 		Method: http.MethodPost, ContentType: contentType, Headers: []string{"x-goog-resumable:start"}, Expires: expiresAt,
 	})
 	if err != nil {
 		return UploadCapability{}, fmt.Errorf("sign resumable upload: %w", err)
 	}
 	return UploadCapability{URL: url, Method: http.MethodPost, Headers: map[string]string{"Content-Type": contentType, "x-goog-resumable": "start"}, ExpiresAt: expiresAt}, nil
+}
+
+func (s GCSStore) BeginRead(ctx context.Context, objectKey string, generation int64, expiresAt time.Time) (ReadCapability, error) {
+	query := make(url.Values)
+	if generation > 0 {
+		query.Set("generation", strconv.FormatInt(generation, 10))
+	}
+	signedURL, err := storage.SignedURL(s.Bucket, objectKey, &storage.SignedURLOptions{
+		Scheme: storage.SigningSchemeV4, GoogleAccessID: s.GoogleAccessID, PrivateKey: s.PrivateKey, SignBytes: s.contextSigner(ctx),
+		Method: http.MethodGet, Expires: expiresAt, QueryParameters: query,
+	})
+	if err != nil {
+		return ReadCapability{}, fmt.Errorf("sign original read: %w", err)
+	}
+	return ReadCapability{URL: signedURL, ExpiresAt: expiresAt}, nil
+}
+
+func (s GCSStore) contextSigner(ctx context.Context) func([]byte) ([]byte, error) {
+	if s.SignBytes == nil {
+		return nil
+	}
+	return func(payload []byte) ([]byte, error) {
+		return s.SignBytes(ctx, payload)
+	}
 }
 
 func (s GCSStore) InspectImage(ctx context.Context, objectKey string, maxBytes int64) (ImageInfo, error) {
@@ -84,10 +104,6 @@ func (s GCSStore) InspectImage(ctx context.Context, objectKey string, maxBytes i
 		return ImageInfo{}, fmt.Errorf("stored content type %q does not match image format %q", attrs.ContentType, format)
 	}
 	return ImageInfo{ContentType: attrs.ContentType, Size: attrs.Size, Width: config.Width, Height: config.Height, SHA256: hex.EncodeToString(hash.Sum(nil)), Generation: attrs.Generation}, nil
-}
-
-func (s GCSStore) Open(ctx context.Context, objectKey string) (io.ReadCloser, error) {
-	return s.Client.Bucket(s.Bucket).Object(objectKey).NewReader(ctx)
 }
 
 func (s GCSStore) Delete(ctx context.Context, objectKey string, generation int64) error {

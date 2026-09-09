@@ -11,6 +11,14 @@ const variants = {
 type Variant = keyof typeof variants;
 type Bindings = Env & { MEDIA_ACCESS_PUBLIC_KEY: string; MEDIA_ORIGIN_SECRET: string };
 type Claims = { aud: string; sub: string; mediaID: string; exp: number };
+const httpStatusTemporaryRedirect = 307;
+
+const clientResponse = (response: Response, cacheControl: string, method: string): Response => {
+  const headers = new Headers(response.headers);
+  headers.set('Cache-Control', cacheControl);
+  headers.set('Vary', 'Accept');
+  return new Response(method === 'HEAD' ? null : response.body, { status: response.status, headers });
+};
 
 const decodeBase64URL = (value: string): Uint8Array => {
   const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
@@ -42,6 +50,11 @@ export default {
     const privateAccess = token ? await verifyToken(token, mediaID, bindings.MEDIA_ACCESS_PUBLIC_KEY) : false;
     if (token && !privateAccess) return new Response('invalid or expired media access', { status: 403 });
 
+    const cacheControl = privateAccess ? 'private, max-age=300' : 'public, max-age=31536000, immutable';
+    const cacheKey = new Request(`${url.origin}${url.pathname}?access=${privateAccess ? 'private' : 'public'}`);
+    const cached = await caches.default.match(cacheKey);
+    if (cached) return clientResponse(cached, cacheControl, request.method);
+
     const originURL = new URL('/v0/media/origin', bindings.ORIGIN_BASE_URL);
     originURL.searchParams.set('mediaID', mediaID);
     const response = await fetch(originURL, {
@@ -50,25 +63,41 @@ export default {
         Authorization: `Bearer ${bindings.MEDIA_ORIGIN_SECRET}`,
         'X-Media-Access-Verified': privateAccess ? 'private' : 'public',
       },
+      redirect: 'manual',
     });
-    if (!response.ok) return new Response(await response.text(), { status: response.status });
-    const cacheControl = privateAccess ? 'private, max-age=300' : 'public, max-age=31536000, immutable';
     if (request.method === 'HEAD') {
+      if (!response.ok) return new Response(await response.text(), { status: response.status });
       return new Response(null, {
         status: response.status,
         headers: { 'Cache-Control': cacheControl, 'Content-Type': 'image/webp', Vary: 'Accept' },
       });
     }
-    if (!response.body) return new Response('origin returned no image body', { status: 502 });
+    if (response.status !== httpStatusTemporaryRedirect) {
+      if (!response.ok) return new Response(await response.text(), { status: response.status });
+      return new Response('origin did not issue a media read capability', { status: 502 });
+    }
+    const location = response.headers.get('Location');
+    if (!location) return new Response('origin read capability is missing', { status: 502 });
+    const readURL = new URL(location);
+    if (readURL.protocol !== 'https:' || readURL.hostname !== 'storage.googleapis.com') {
+      return new Response('origin read capability is invalid', { status: 502 });
+    }
+    const original = await fetch(readURL, { method: 'GET', redirect: 'error' });
+    if (!original.ok) {
+      console.error('media registry points to unavailable original', { mediaID, status: original.status });
+      return new Response(await original.text(), { status: original.status });
+    }
+    if (!original.body) return new Response('media original returned no image body', { status: 502 });
 
     const transformed = (
-      await bindings.IMAGES.input(response.body)
+      await bindings.IMAGES.input(original.body)
         .transform(variants[match[2] as Variant])
         .output({ format: 'image/webp', quality: 82 })
     ).response();
-    const headers = new Headers(transformed.headers);
-    headers.set('Cache-Control', cacheControl);
-    headers.set('Vary', 'Accept');
-    return new Response(transformed.body, { status: transformed.status, headers });
+    const result = clientResponse(transformed, cacheControl, request.method);
+    const cachedResult = result.clone();
+    cachedResult.headers.set('Cache-Control', privateAccess ? 'public, max-age=300' : cacheControl);
+    await caches.default.put(cacheKey, cachedResult);
+    return result;
   },
 } satisfies ExportedHandler<Env>;

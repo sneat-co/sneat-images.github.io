@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 
 const base64URL = (bytes: Uint8Array): string =>
@@ -8,6 +8,18 @@ const base64URL = (bytes: Uint8Array): string =>
     .replace(/=+$/, '');
 
 describe('media edge', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const edgeCache = () => {
+    const match = vi.fn().mockResolvedValue(undefined);
+    const put = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('caches', { default: { match, put } });
+    return { match, put };
+  };
+
   const images = () => {
     const output = vi.fn().mockResolvedValue({
       response: () => new Response('transformed', { headers: { 'Content-Type': 'image/webp' } }),
@@ -34,6 +46,7 @@ describe('media edge', () => {
   });
 
   it('preserves an origin error without attempting a transformation', async () => {
+    edgeCache();
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('media not found', { status: 404 }));
     const imageBinding = images();
     const response = await worker.fetch(new Request('https://media.sneat.co/m/m_abcdefghijklmnopqrstuvwxyz/avatar'), {
@@ -41,6 +54,20 @@ describe('media edge', () => {
     } as never);
     expect(response.status).toBe(404);
     expect(await response.text()).toBe('media not found');
+    expect(imageBinding.input).not.toHaveBeenCalled();
+  });
+
+  it('rejects a read capability outside the configured GCS origin', async () => {
+    edgeCache();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, {
+      status: 307,
+      headers: { Location: 'https://example.com/untrusted-image' },
+    }));
+    const imageBinding = images();
+    const response = await worker.fetch(new Request('https://media.sneat.co/m/m_abcdefghijklmnopqrstuvwxyz/avatar'), {
+      ORIGIN_BASE_URL: 'https://api.example', MEDIA_ACCESS_PUBLIC_KEY: '', MEDIA_ORIGIN_SECRET: 'secret', IMAGES: imageBinding.binding,
+    } as never);
+    expect(response.status).toBe(502);
     expect(imageBinding.input).not.toHaveBeenCalled();
   });
 
@@ -85,7 +112,17 @@ describe('media edge', () => {
     );
     const origin = vi
       .spyOn(globalThis, 'fetch')
-      .mockImplementation(async () => new Response('image', { status: 200 }));
+      .mockImplementation(async (input) => {
+        const requestURL = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+        if (requestURL.hostname === 'api.example') {
+          return new Response(null, {
+            status: 307,
+            headers: { Location: 'https://storage.googleapis.com/media-originals/original?signed=true' },
+          });
+        }
+        return new Response('image', { status: 200 });
+      });
+    const cache = edgeCache();
     const imageBinding = images();
     const env = {
       ORIGIN_BASE_URL: 'https://api.example',
@@ -106,13 +143,21 @@ describe('media edge', () => {
     );
 
     const privateHeaders = new Headers((origin.mock.calls[0][1] as RequestInit).headers);
-    const publicHeaders = new Headers((origin.mock.calls[1][1] as RequestInit).headers);
+    const publicHeaders = new Headers((origin.mock.calls[2][1] as RequestInit).headers);
     expect(privateHeaders.get('X-Media-Access-Verified')).toBe('private');
     expect(publicHeaders.get('X-Media-Access-Verified')).toBe('public');
+    expect(new Headers((origin.mock.calls[1][1] as RequestInit).headers).get('Authorization')).toBeNull();
+    expect(new Headers((origin.mock.calls[3][1] as RequestInit).headers).get('Authorization')).toBeNull();
     expect(privateResponse.headers.get('Cache-Control')).toBe('private, max-age=300');
     expect(publicResponse.headers.get('Cache-Control')).toBe('public, max-age=31536000, immutable');
     expect(imageBinding.input).toHaveBeenCalledTimes(2);
     expect(imageBinding.transform).toHaveBeenCalledWith({ width: 96, height: 96, fit: 'cover' });
     expect(imageBinding.output).toHaveBeenCalledWith({ format: 'image/webp', quality: 82 });
+    const privateCacheKey = cache.put.mock.calls[0][0] as Request;
+    const publicCacheKey = cache.put.mock.calls[1][0] as Request;
+    expect(privateCacheKey.url).toContain('access=private');
+    expect(publicCacheKey.url).toContain('access=public');
+    expect(privateCacheKey.url).not.toContain(token);
+    expect(publicCacheKey.url).not.toContain(token);
   });
 });

@@ -5,7 +5,6 @@ package api4media
 import (
 	"crypto/subtle"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"time"
@@ -171,18 +170,17 @@ func (h Handler) origin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "private media requires verified access", http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", asset.ContentType)
-	w.Header().Set("Content-Length", fmt.Sprint(asset.Size))
 	w.Header().Set("Cache-Control", "private, no-store")
 	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", asset.ContentType)
+		w.Header().Set("Content-Length", fmt.Sprint(asset.Size))
 		return
 	}
-	reader, err := h.Service.Blob.Open(r.Context(), asset.Storage.ObjectKey)
+	capability, err := h.Service.Blob.BeginRead(r.Context(), asset.Storage.ObjectKey, asset.Storage.Generation, time.Now().UTC().Add(2*time.Minute))
 	if err != nil {
-		log.Printf("media registry points to unavailable blob mediaID=%s objectKey=%s err=%v", mediaID, asset.Storage.ObjectKey, err)
+		log.Printf("create media original read capability mediaID=%s objectKey=%s err=%v", mediaID, asset.Storage.ObjectKey, err)
 		http.Error(w, "origin unavailable", http.StatusBadGateway)
 		return
 	}
-	defer reader.Close()
-	_, _ = io.Copy(w, reader)
+	http.Redirect(w, r, capability.URL, http.StatusTemporaryRedirect)
 }
