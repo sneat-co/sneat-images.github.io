@@ -9,7 +9,7 @@ const variants = {
 } as const;
 
 type Variant = keyof typeof variants;
-type Secrets = { MEDIA_ACCESS_PUBLIC_KEY: string; MEDIA_ORIGIN_SECRET: string };
+type Bindings = Env & { MEDIA_ACCESS_PUBLIC_KEY: string; MEDIA_ORIGIN_SECRET: string };
 type Claims = { aud: string; sub: string; mediaID: string; exp: number };
 
 const decodeBase64URL = (value: string): Uint8Array => {
@@ -33,7 +33,7 @@ const verifyToken = async (token: string, mediaID: string, publicKey: string): P
 export default {
   async fetch(request, env): Promise<Response> {
     if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('method not allowed', { status: 405 });
-    const bindings = env as Env & Secrets;
+    const bindings = env as Bindings;
     const url = new URL(request.url);
     const match = /^\/m\/(m_[A-Za-z0-9_-]{20,40})\/([a-z-]+)$/.exec(url.pathname);
     if (!match || !(match[2] in variants)) return new Response('not found', { status: 404 });
@@ -50,16 +50,25 @@ export default {
         Authorization: `Bearer ${bindings.MEDIA_ORIGIN_SECRET}`,
         'X-Media-Access-Verified': privateAccess ? 'private' : 'public',
       },
-      cf: {
-        image: { ...variants[match[2] as Variant], quality: 82, format: 'webp', 'origin-auth': 'share-publicly' },
-        cacheEverything: true,
-        cacheKey: `${originURL.origin}${url.pathname}?access=${privateAccess ? 'private' : 'public'}`,
-      },
     });
     if (!response.ok) return new Response(await response.text(), { status: response.status });
-    const headers = new Headers(response.headers);
-    headers.set('Cache-Control', privateAccess ? 'private, max-age=300' : 'public, max-age=31536000, immutable');
+    const cacheControl = privateAccess ? 'private, max-age=300' : 'public, max-age=31536000, immutable';
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: response.status,
+        headers: { 'Cache-Control': cacheControl, 'Content-Type': 'image/webp', Vary: 'Accept' },
+      });
+    }
+    if (!response.body) return new Response('origin returned no image body', { status: 502 });
+
+    const transformed = (
+      await bindings.IMAGES.input(response.body)
+        .transform(variants[match[2] as Variant])
+        .output({ format: 'image/webp', quality: 82 })
+    ).response();
+    const headers = new Headers(transformed.headers);
+    headers.set('Cache-Control', cacheControl);
     headers.set('Vary', 'Accept');
-    return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });
+    return new Response(transformed.body, { status: transformed.status, headers });
   },
 } satisfies ExportedHandler<Env>;
